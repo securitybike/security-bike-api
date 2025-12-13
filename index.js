@@ -5,39 +5,47 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Base de datos simple (temporal)
+const PORT = process.env.PORT || 3000;
+
+// zonas en memoria
 let zonasRojas = [];
 
-// Endpoint para reportar robo
+// duración de zona roja: 30 minutos
+const TTL_MINUTOS = 30;
+
+// registrar robo
 app.post("/robo", (req, res) => {
   const { lat, lng, zona } = req.body;
 
-  if (!lat || !lng || !zona) {
-    return res.status(400).json({ error: "Datos incompletos" });
+  if (!lat || !lng) {
+    return res.status(400).json({ error: "lat y lng son obligatorios" });
   }
 
-  const nuevoRobo = {
+  const ahora = new Date();
+  const expira = new Date(ahora.getTime() + TTL_MINUTOS * 60 * 1000);
+
+  zonasRojas.push({
     lat,
     lng,
-    zona,
-    fecha: new Date()
-  };
-
-  zonasRojas.push(nuevoRobo);
-
-  res.json({
-    mensaje: "Robo registrado",
-    robo: nuevoRobo
+    zona: zona || "Zona reportada",
+    fecha: ahora,
+    expiresAt: expira
   });
+
+  res.json({ mensaje: "Robo registrado", expira });
 });
 
-// Endpoint para obtener zonas rojas
+// obtener zonas rojas activas
 app.get("/zonas-rojas", (req, res) => {
+  const ahora = new Date();
+
+  // eliminar zonas vencidas
+  zonasRojas = zonasRojas.filter(z => new Date(z.expiresAt) > ahora);
+
   res.json(zonasRojas);
 });
 
-// Servidor
-const PORT = 3000;
 app.listen(PORT, () => {
-  console.log(`Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`Servidor corriendo en el puerto ${PORT}`);
 });
+
