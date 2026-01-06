@@ -6,68 +6,79 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const { Pool } = pkg;
-
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
-/* ============================
-   CONEXIÓN A POSTGRES (Render)
-   ============================ */
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// ============================
+// CONEXIÓN A POSTGRES (Render)
+// ============================
+let pool;
+try {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+  console.log("✅ Conexión a PostgreSQL creada correctamente.");
+} catch (error) {
+  console.error("❌ Error creando conexión a PostgreSQL:", error.message);
+  process.exit(1);
+}
 
-/* ============================
-   CONFIGURACIÓN
-   ============================ */
+// ============================
+// CONFIGURACIÓN
+// ============================
 const TTL_MINUTOS = 30;
 
-/* ============================
-   RUTA ROOT (verificación)
-   ============================ */
+// ============================
+// RUTA ROOT (verificación)
+// ============================
 app.get("/", (req, res) => {
   res.send("🚲 SecurityBike API OK");
 });
 
-/* ============================
-   CREAR TABLA SI NO EXISTE
-   ============================ */
+// ============================
+// CREAR TABLA SI NO EXISTE
+// ============================
 const initDB = async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS zonas_rojas (
-      id SERIAL PRIMARY KEY,
-      lat DOUBLE PRECISION NOT NULL,
-      lng DOUBLE PRECISION NOT NULL,
-      zona TEXT,
-      hora TEXT,
-      tipo_robo TEXT,
-      fecha TEXT,
-      tipo_bici TEXT,
-      marca_bici TEXT,
-      modelo_bici TEXT,
-      anio_bici TEXT,
-      numero_serie TEXT,
-      color TEXT,
-      descripcion_bici TEXT,
-      nombre_reportante TEXT,
-      email_reportante TEXT,
-      telefono_reportante TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      expires_at TIMESTAMP NOT NULL
-    );
-  `);
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS zonas_rojas (
+        id SERIAL PRIMARY KEY,
+        lat DOUBLE PRECISION NOT NULL,
+        lng DOUBLE PRECISION NOT NULL,
+        zona TEXT,
+        hora TEXT,
+        tipo_robo TEXT,
+        fecha TEXT,
+        tipo_bici TEXT,
+        marca_bici TEXT,
+        modelo_bici TEXT,
+        anio_bici TEXT,
+        numero_serie TEXT,
+        color TEXT,
+        descripcion_bici TEXT,
+        nombre_reportante TEXT,
+        email_reportante TEXT,
+        telefono_reportante TEXT,
+        created_at TIMESTAMP DEFAULT NOW(),
+        expires_at TIMESTAMP NOT NULL
+      );
+    `);
+    console.log("✅ Tabla 'zonas_rojas' verificada/creada.");
+  } catch (error) {
+    console.error("❌ Error creando/verificando tabla:", error.message);
+    process.exit(1);
+  }
 };
 
-initDB().catch(console.error);
+initDB();
 
-/* ============================
-   REGISTRAR ROBO
-   POST /robo
-   ============================ */
+// ============================
+// REGISTRAR ROBO (POST /robo)
+// ============================
 app.post("/robo", async (req, res) => {
   const {
     lat,
@@ -88,8 +99,13 @@ app.post("/robo", async (req, res) => {
     telefonoReportante
   } = req.body;
 
-  if (!lat || !lng) {
-    return res.status(400).json({ error: "lat y lng son obligatorios" });
+  if (
+    lat === undefined ||
+    lng === undefined ||
+    isNaN(Number(lat)) ||
+    isNaN(Number(lng))
+  ) {
+    return res.status(400).json({ error: "lat y lng válidos son obligatorios" });
   }
 
   const ahora = new Date();
@@ -136,21 +152,17 @@ app.post("/robo", async (req, res) => {
       expira
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Error guardando el robo" });
+    console.error("❌ Error en POST /robo:", err.message);
+    res.status(500).json({ error: "Error guardando el robo", detalle: err.message });
   }
 });
 
-/* ============================
-   OBTENER ZONAS ROJAS ACTIVAS
-   GET /zonas-rojas
-   ============================ */
+// ============================
+// OBTENER ZONAS ROJAS ACTIVAS (GET /zonas-rojas)
+// ============================
 app.get("/zonas-rojas", async (req, res) => {
   try {
-    // Eliminar reportes expirados
     await pool.query(`DELETE FROM zonas_rojas WHERE expires_at < NOW()`);
-
-    // Consultar los activos
     const result = await pool.query(`
       SELECT
         lat, lng, zona, hora, tipo_robo AS "tipoRobo", fecha,
@@ -166,14 +178,14 @@ app.get("/zonas-rojas", async (req, res) => {
 
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Error obteniendo zonas rojas" });
+    console.error("❌ Error en GET /zonas-rojas:", err.message);
+    res.status(500).json({ error: "Error obteniendo zonas rojas", detalle: err.message });
   }
 });
 
-/* ============================
-   INICIAR SERVIDOR
-   ============================ */
+// ============================
+// INICIAR SERVIDOR
+// ============================
 app.listen(PORT, () => {
   console.log(`🚀 SecurityBike API corriendo en puerto ${PORT}`);
 });
