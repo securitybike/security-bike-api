@@ -18,9 +18,7 @@ const PORT = process.env.PORT || 3000;
    ============================ */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
 /* ============================
@@ -29,7 +27,7 @@ const pool = new Pool({
 const TTL_MINUTOS = 30;
 
 /* ============================
-   RUTA ROOT (evita Cannot GET /)
+   RUTA ROOT (verificación)
    ============================ */
 app.get("/", (req, res) => {
   res.send("🚲 SecurityBike API OK");
@@ -45,6 +43,19 @@ const initDB = async () => {
       lat DOUBLE PRECISION NOT NULL,
       lng DOUBLE PRECISION NOT NULL,
       zona TEXT,
+      hora TEXT,
+      tipo_robo TEXT,
+      fecha TEXT,
+      tipo_bici TEXT,
+      marca_bici TEXT,
+      modelo_bici TEXT,
+      anio_bici TEXT,
+      numero_serie TEXT,
+      color TEXT,
+      descripcion_bici TEXT,
+      nombre_reportante TEXT,
+      email_reportante TEXT,
+      telefono_reportante TEXT,
       created_at TIMESTAMP DEFAULT NOW(),
       expires_at TIMESTAMP NOT NULL
     );
@@ -58,7 +69,24 @@ initDB().catch(console.error);
    POST /robo
    ============================ */
 app.post("/robo", async (req, res) => {
-  const { lat, lng, zona } = req.body;
+  const {
+    lat,
+    lng,
+    zona,
+    hora,
+    tipoRobo,
+    fecha,
+    tipoBici,
+    marcaBici,
+    modeloBici,
+    anioBici,
+    numeroSerie,
+    color,
+    descripcionBici,
+    nombreReportante,
+    emailReportante,
+    telefonoReportante
+  } = req.body;
 
   if (!lat || !lng) {
     return res.status(400).json({ error: "lat y lng son obligatorios" });
@@ -69,13 +97,42 @@ app.post("/robo", async (req, res) => {
 
   try {
     await pool.query(
-      `INSERT INTO zonas_rojas (lat, lng, zona, expires_at)
-       VALUES ($1, $2, $3, $4)`,
-      [lat, lng, zona || "Robo de bicicleta", expira]
+      `INSERT INTO zonas_rojas (
+        lat, lng, zona, hora, tipo_robo, fecha,
+        tipo_bici, marca_bici, modelo_bici, anio_bici,
+        numero_serie, color, descripcion_bici,
+        nombre_reportante, email_reportante, telefono_reportante,
+        expires_at
+      ) VALUES (
+        $1,$2,$3,$4,$5,$6,
+        $7,$8,$9,$10,
+        $11,$12,$13,
+        $14,$15,$16,
+        $17
+      )`,
+      [
+        lat,
+        lng,
+        zona || "No especificado",
+        hora || null,
+        tipoRobo || null,
+        fecha || null,
+        tipoBici || null,
+        marcaBici || null,
+        modeloBici || null,
+        anioBici || null,
+        numeroSerie || null,
+        color || null,
+        descripcionBici || null,
+        nombreReportante || null,
+        emailReportante || null,
+        telefonoReportante || null,
+        expira
+      ]
     );
 
     res.json({
-      mensaje: "🚨 Robo registrado",
+      mensaje: "🚨 Robo registrado correctamente",
       expira
     });
   } catch (err) {
@@ -90,28 +147,35 @@ app.post("/robo", async (req, res) => {
    ============================ */
 app.get("/zonas-rojas", async (req, res) => {
   try {
-    // borrar vencidas
-    await pool.query(
-      `DELETE FROM zonas_rojas WHERE expires_at < NOW()`
-    );
+    // Eliminar reportes expirados
+    await pool.query(`DELETE FROM zonas_rojas WHERE expires_at < NOW()`);
 
-    // traer activas
-    const result = await pool.query(
-      `SELECT lat, lng, zona
-       FROM zonas_rojas
-       ORDER BY created_at DESC`
-    );
+    // Consultar los activos
+    const result = await pool.query(`
+      SELECT
+        lat, lng, zona, hora, tipo_robo AS "tipoRobo", fecha,
+        tipo_bici AS "tipoBici",
+        marca_bici AS "marcaBici",
+        modelo_bici AS "modeloBici",
+        anio_bici AS "anioBici",
+        numero_serie AS "numeroSerie",
+        color, descripcion_bici AS "descripcionBici"
+      FROM zonas_rojas
+      ORDER BY created_at DESC
+    `);
 
     res.json(result.rows);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error obteniendo zonas" });
+    res.status(500).json({ error: "Error obteniendo zonas rojas" });
   }
 });
 
 /* ============================
-   START SERVER
+   INICIAR SERVIDOR
    ============================ */
 app.listen(PORT, () => {
   console.log(`🚀 SecurityBike API corriendo en puerto ${PORT}`);
 });
+
+export default app;
