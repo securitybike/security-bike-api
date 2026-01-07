@@ -6,9 +6,13 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const { Pool } = pkg;
+
 const app = express();
 app.use(cors());
-app.use(express.json());
+
+// ✅ LÍMITE DE PAYLOAD (para evitar 413 si envías fotos/base64)
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -30,54 +34,78 @@ try {
 // ============================
 // CONFIGURACIÓN
 // ============================
-const TTL_MINUTOS = 30;
+const TTL_MINUTOS = Number(process.env.TTL_MINUTOS || 30);
 
 // ============================
-// RUTA ROOT (verificación)
+// RUTA ROOT
 // ============================
 app.get("/", (req, res) => {
   res.send("🚲 SecurityBike API OK");
 });
 
 // ============================
-// CREAR TABLA SI NO EXISTE
+// CREAR TABLA + COLUMNAS (idempotente)
 // ============================
 const initDB = async () => {
   try {
+    // 1) Crea tabla base si no existe
     await pool.query(`
       CREATE TABLE IF NOT EXISTS zonas_rojas (
         id SERIAL PRIMARY KEY,
         lat DOUBLE PRECISION NOT NULL,
         lng DOUBLE PRECISION NOT NULL,
         zona TEXT,
-        hora TEXT,
-        tipo_robo TEXT,
-        fecha TEXT,
-        tipo_bici TEXT,
-        marca_bici TEXT,
-        modelo_bici TEXT,
-        anio_bici TEXT,
-        numero_serie TEXT,
-        color TEXT,
-        descripcion_bici TEXT,
-        nombre_reportante TEXT,
-        email_reportante TEXT,
-        telefono_reportante TEXT,
         created_at TIMESTAMP DEFAULT NOW(),
-        expires_at TIMESTAMP NOT NULL
+        expires_at TIMESTAMP
       );
     `);
-    console.log("✅ Tabla 'zonas_rojas' verificada/creada.");
+
+    // 2) Asegura columnas nuevas (no falla si ya existen)
+    await pool.query(`
+      ALTER TABLE zonas_rojas
+        ADD COLUMN IF NOT EXISTS hora TEXT,
+        ADD COLUMN IF NOT EXISTS tipo_robo TEXT,
+        ADD COLUMN IF NOT EXISTS fecha TEXT,
+        ADD COLUMN IF NOT EXISTS tipo_bici TEXT,
+        ADD COLUMN IF NOT EXISTS marca_bici TEXT,
+        ADD COLUMN IF NOT EXISTS modelo_bici TEXT,
+        ADD COLUMN IF NOT EXISTS anio_bici TEXT,
+        ADD COLUMN IF NOT EXISTS numero_serie TEXT,
+        ADD COLUMN IF NOT EXISTS color TEXT,
+        ADD COLUMN IF NOT EXISTS descripcion_bici TEXT,
+        ADD COLUMN IF NOT EXISTS nombre_reportante TEXT,
+        ADD COLUMN IF NOT EXISTS email_reportante TEXT,
+        ADD COLUMN IF NOT EXISTS telefono_reportante TEXT;
+    `);
+
+    // 3) Asegura expires_at con default
+    await pool.query(`
+      ALTER TABLE zonas_rojas
+        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
+    `);
+
+    await pool.query(`
+      UPDATE zonas_rojas
+      SET expires_at = NOW() + INTERVAL '30 minutes'
+      WHERE expires_at IS NULL;
+    `);
+
+    await pool.query(`
+      ALTER TABLE zonas_rojas
+        ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '30 minutes';
+    `);
+
+    console.log("✅ BD lista: tabla/columnas verificadas.");
   } catch (error) {
-    console.error("❌ Error creando/verificando tabla:", error.message);
+    console.error("❌ Error inicializando BD:", error.message);
     process.exit(1);
   }
 };
 
-initDB();
+initDB().catch(console.error);
 
 // ============================
-// REGISTRAR ROBO (POST /robo)
+// POST /robo  (guardar reporte)
 // ============================
 app.post("/robo", async (req, res) => {
   const {
@@ -96,15 +124,13 @@ app.post("/robo", async (req, res) => {
     descripcionBici,
     nombreReportante,
     emailReportante,
-    telefonoReportante
+    telefonoReportante,
   } = req.body;
 
-  if (
-    lat === undefined ||
-    lng === undefined ||
-    isNaN(Number(lat)) ||
-    isNaN(Number(lng))
-  ) {
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
     return res.status(400).json({ error: "lat y lng válidos son obligatorios" });
   }
 
@@ -127,8 +153,8 @@ app.post("/robo", async (req, res) => {
         $17
       )`,
       [
-        lat,
-        lng,
+        latNum,
+        lngNum,
         zona || "No especificado",
         hora || null,
         tipoRobo || null,
@@ -143,48 +169,62 @@ app.post("/robo", async (req, res) => {
         nombreReportante || null,
         emailReportante || null,
         telefonoReportante || null,
-        expira
+        expira,
       ]
     );
 
-    res.json({
+    return res.json({
       mensaje: "🚨 Robo registrado correctamente",
-      expira
+      expira,
     });
   } catch (err) {
     console.error("❌ Error en POST /robo:", err.message);
-    res.status(500).json({ error: "Error guardando el robo", detalle: err.message });
+    return res
+      .status(500)
+      .json({ error: "Error guardando el robo", detalle: err.message });
   }
 });
 
 // ============================
-// OBTENER ZONAS ROJAS ACTIVAS (GET /zonas-rojas)
+// GET /zonas-rojas (devolver activos)
 // ============================
 app.get("/zonas-rojas", async (req, res) => {
   try {
     await pool.query(`DELETE FROM zonas_rojas WHERE expires_at < NOW()`);
+
     const result = await pool.query(`
       SELECT
-        lat, lng, zona, hora, tipo_robo AS "tipoRobo", fecha,
+        lat,
+        lng,
+        zona,
+        hora,
+        tipo_robo AS "tipoRobo",
+        fecha,
         tipo_bici AS "tipoBici",
         marca_bici AS "marcaBici",
         modelo_bici AS "modeloBici",
         anio_bici AS "anioBici",
         numero_serie AS "numeroSerie",
-        color, descripcion_bici AS "descripcionBici"
+        color,
+        descripcion_bici AS "descripcionBici",
+        nombre_reportante AS "nombreReportante",
+        email_reportante AS "emailReportante",
+        telefono_reportante AS "telefonoReportante"
       FROM zonas_rojas
       ORDER BY created_at DESC
     `);
 
-    res.json(result.rows);
+    return res.json(result.rows);
   } catch (err) {
     console.error("❌ Error en GET /zonas-rojas:", err.message);
-    res.status(500).json({ error: "Error obteniendo zonas rojas", detalle: err.message });
+    return res
+      .status(500)
+      .json({ error: "Error obteniendo zonas rojas", detalle: err.message });
   }
 });
 
 // ============================
-// INICIAR SERVIDOR
+// START SERVER
 // ============================
 app.listen(PORT, () => {
   console.log(`🚀 SecurityBike API corriendo en puerto ${PORT}`);
