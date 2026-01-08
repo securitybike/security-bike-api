@@ -6,109 +6,83 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const { Pool } = pkg;
-
 const app = express();
+
 app.use(cors());
 
-// ✅ LÍMITE DE PAYLOAD (esto ayuda, pero Base64 grande igual puede dar 413 en Render)
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ limit: "10mb", extended: true }));
+// (Ya no deberías enviar base64, pero igual deja límite por seguridad)
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ limit: "2mb", extended: true }));
 
 const PORT = process.env.PORT || 3000;
+const TTL_MINUTOS = Number(process.env.TTL_MINUTOS || 30);
 
 // ============================
 // CONEXIÓN A POSTGRES (Render)
 // ============================
-let pool;
-try {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
-  });
-  console.log("✅ Conexión a PostgreSQL creada correctamente.");
-} catch (error) {
-  console.error("❌ Error creando conexión a PostgreSQL:", error.message);
-  process.exit(1);
-}
-
-// ============================
-// CONFIGURACIÓN
-// ============================
-const TTL_MINUTOS = Number(process.env.TTL_MINUTOS || 30);
-
-// ============================
-// RUTA ROOT
-// ============================
-app.get("/", (req, res) => {
-  res.send("🚲 SecurityBike API OK");
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
 });
 
+app.get("/", (req, res) => res.send("🚲 SecurityBike API OK"));
+
 // ============================
-// CREAR TABLA + COLUMNAS (idempotente)
+// INIT DB (idempotente)
 // ============================
 const initDB = async () => {
-  try {
-    // 1) Crea tabla base si no existe
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS zonas_rojas (
-        id SERIAL PRIMARY KEY,
-        lat DOUBLE PRECISION NOT NULL,
-        lng DOUBLE PRECISION NOT NULL,
-        zona TEXT,
-        created_at TIMESTAMP DEFAULT NOW(),
-        expires_at TIMESTAMP
-      );
-    `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS zonas_rojas (
+      id SERIAL PRIMARY KEY,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      zona TEXT,
+      created_at TIMESTAMP DEFAULT NOW(),
+      expires_at TIMESTAMP
+    );
+  `);
 
-    // 2) Asegura columnas nuevas (no falla si ya existen)
-    await pool.query(`
-      ALTER TABLE zonas_rojas
-        ADD COLUMN IF NOT EXISTS hora TEXT,
-        ADD COLUMN IF NOT EXISTS tipo_robo TEXT,
-        ADD COLUMN IF NOT EXISTS fecha TEXT,
-        ADD COLUMN IF NOT EXISTS tipo_bici TEXT,
-        ADD COLUMN IF NOT EXISTS marca_bici TEXT,
-        ADD COLUMN IF NOT EXISTS modelo_bici TEXT,
-        ADD COLUMN IF NOT EXISTS anio_bici TEXT,
-        ADD COLUMN IF NOT EXISTS numero_serie TEXT,
-        ADD COLUMN IF NOT EXISTS color TEXT,
-        ADD COLUMN IF NOT EXISTS descripcion_bici TEXT,
-        ADD COLUMN IF NOT EXISTS nombre_reportante TEXT,
-        ADD COLUMN IF NOT EXISTS email_reportante TEXT,
-        ADD COLUMN IF NOT EXISTS telefono_reportante TEXT,
+  await pool.query(`
+    ALTER TABLE zonas_rojas
+      ADD COLUMN IF NOT EXISTS hora TEXT,
+      ADD COLUMN IF NOT EXISTS tipo_robo TEXT,
+      ADD COLUMN IF NOT EXISTS fecha TEXT,
+      ADD COLUMN IF NOT EXISTS tipo_bici TEXT,
+      ADD COLUMN IF NOT EXISTS marca_bici TEXT,
+      ADD COLUMN IF NOT EXISTS modelo_bici TEXT,
+      ADD COLUMN IF NOT EXISTS anio_bici TEXT,
+      ADD COLUMN IF NOT EXISTS numero_serie TEXT,
+      ADD COLUMN IF NOT EXISTS color TEXT,
+      ADD COLUMN IF NOT EXISTS descripcion_bici TEXT,
+      ADD COLUMN IF NOT EXISTS nombre_reportante TEXT,
+      ADD COLUMN IF NOT EXISTS email_reportante TEXT,
+      ADD COLUMN IF NOT EXISTS telefono_reportante TEXT,
+      ADD COLUMN IF NOT EXISTS foto_urls JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `);
 
-        -- ✅ NUEVO: guardar fotos como URLs (NO base64)
-        ADD COLUMN IF NOT EXISTS foto_urls TEXT[];
-    `);
+  await pool.query(`
+    ALTER TABLE zonas_rojas
+      ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
+  `);
 
-    // 3) Asegura expires_at con default
-    await pool.query(`
-      ALTER TABLE zonas_rojas
-        ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP;
-    `);
+  await pool.query(`
+    UPDATE zonas_rojas
+    SET expires_at = NOW() + INTERVAL '30 minutes'
+    WHERE expires_at IS NULL;
+  `);
 
-    await pool.query(`
-      UPDATE zonas_rojas
-      SET expires_at = NOW() + INTERVAL '30 minutes'
-      WHERE expires_at IS NULL;
-    `);
+  await pool.query(`
+    ALTER TABLE zonas_rojas
+      ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '30 minutes';
+  `);
 
-    await pool.query(`
-      ALTER TABLE zonas_rojas
-        ALTER COLUMN expires_at SET DEFAULT NOW() + INTERVAL '30 minutes';
-    `);
-
-    console.log("✅ BD lista: tabla/columnas verificadas.");
-  } catch (error) {
-    console.error("❌ Error inicializando BD:", error.message);
-    process.exit(1);
-  }
+  console.log("✅ BD lista (tabla/columnas verificadas).");
 };
 
-initDB().catch(console.error);
+initDB().catch((e) => console.error("❌ initDB:", e.message));
 
 // ============================
-// POST /robo  (guardar reporte)
+// POST /robo (guardar)
 // ============================
 app.post("/robo", async (req, res) => {
   const {
@@ -128,9 +102,7 @@ app.post("/robo", async (req, res) => {
     nombreReportante,
     emailReportante,
     telefonoReportante,
-
-    // ✅ NUEVO: URLs de fotos (array de strings)
-    fotoUrls,
+    fotoUrls, // ✅ NUEVO: lista de URLs Cloudinary
   } = req.body;
 
   const latNum = Number(lat);
@@ -140,9 +112,9 @@ app.post("/robo", async (req, res) => {
     return res.status(400).json({ error: "lat y lng válidos son obligatorios" });
   }
 
-  // Normaliza fotoUrls a array de strings
+  // ✅ Sanitiza fotoUrls
   const urls = Array.isArray(fotoUrls)
-    ? fotoUrls.filter((u) => typeof u === "string" && u.trim().length > 0)
+    ? fotoUrls.filter((u) => typeof u === "string" && u.startsWith("http"))
     : [];
 
   const ahora = new Date();
@@ -162,7 +134,7 @@ app.post("/robo", async (req, res) => {
         $7,$8,$9,$10,
         $11,$12,$13,
         $14,$15,$16,
-        $17,
+        $17::jsonb,
         $18
       )`,
       [
@@ -182,26 +154,20 @@ app.post("/robo", async (req, res) => {
         nombreReportante || null,
         emailReportante || null,
         telefonoReportante || null,
-        urls.length ? urls : null,
+        JSON.stringify(urls), // ✅ guarda como JSONB
         expira,
       ]
     );
 
-    return res.json({
-      mensaje: "🚨 Robo registrado correctamente",
-      expira,
-      fotosGuardadas: urls.length,
-    });
+    return res.json({ mensaje: "🚨 Robo registrado correctamente", expira, fotos: urls.length });
   } catch (err) {
-    console.error("❌ Error en POST /robo:", err.message);
-    return res
-      .status(500)
-      .json({ error: "Error guardando el robo", detalle: err.message });
+    console.error("❌ POST /robo:", err.message);
+    return res.status(500).json({ error: "Error guardando el robo", detalle: err.message });
   }
 });
 
 // ============================
-// GET /zonas-rojas (devolver activos)
+// GET /zonas-rojas (devolver)
 // ============================
 app.get("/zonas-rojas", async (req, res) => {
   try {
@@ -225,25 +191,17 @@ app.get("/zonas-rojas", async (req, res) => {
         nombre_reportante AS "nombreReportante",
         email_reportante AS "emailReportante",
         telefono_reportante AS "telefonoReportante",
-        COALESCE(foto_urls, ARRAY[]::text[]) AS "fotoUrls"
+        foto_urls AS "fotoUrls"  -- ✅ NUEVO
       FROM zonas_rojas
       ORDER BY created_at DESC
     `);
 
     return res.json(result.rows);
   } catch (err) {
-    console.error("❌ Error en GET /zonas-rojas:", err.message);
-    return res
-      .status(500)
-      .json({ error: "Error obteniendo zonas rojas", detalle: err.message });
+    console.error("❌ GET /zonas-rojas:", err.message);
+    return res.status(500).json({ error: "Error obteniendo zonas rojas", detalle: err.message });
   }
 });
 
-// ============================
-// START SERVER
-// ============================
-app.listen(PORT, () => {
-  console.log(`🚀 SecurityBike API corriendo en puerto ${PORT}`);
-});
-
+app.listen(PORT, () => console.log(`🚀 API corriendo en puerto ${PORT}`));
 export default app;
