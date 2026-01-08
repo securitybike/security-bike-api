@@ -10,7 +10,7 @@ const { Pool } = pkg;
 const app = express();
 app.use(cors());
 
-// ✅ LÍMITE DE PAYLOAD (para evitar 413 si envías fotos/base64)
+// ✅ LÍMITE DE PAYLOAD (esto ayuda, pero Base64 grande igual puede dar 413 en Render)
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
@@ -75,7 +75,10 @@ const initDB = async () => {
         ADD COLUMN IF NOT EXISTS descripcion_bici TEXT,
         ADD COLUMN IF NOT EXISTS nombre_reportante TEXT,
         ADD COLUMN IF NOT EXISTS email_reportante TEXT,
-        ADD COLUMN IF NOT EXISTS telefono_reportante TEXT;
+        ADD COLUMN IF NOT EXISTS telefono_reportante TEXT,
+
+        -- ✅ NUEVO: guardar fotos como URLs (NO base64)
+        ADD COLUMN IF NOT EXISTS foto_urls TEXT[];
     `);
 
     // 3) Asegura expires_at con default
@@ -125,6 +128,9 @@ app.post("/robo", async (req, res) => {
     nombreReportante,
     emailReportante,
     telefonoReportante,
+
+    // ✅ NUEVO: URLs de fotos (array de strings)
+    fotoUrls,
   } = req.body;
 
   const latNum = Number(lat);
@@ -133,6 +139,11 @@ app.post("/robo", async (req, res) => {
   if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) {
     return res.status(400).json({ error: "lat y lng válidos son obligatorios" });
   }
+
+  // Normaliza fotoUrls a array de strings
+  const urls = Array.isArray(fotoUrls)
+    ? fotoUrls.filter((u) => typeof u === "string" && u.trim().length > 0)
+    : [];
 
   const ahora = new Date();
   const expira = new Date(ahora.getTime() + TTL_MINUTOS * 60 * 1000);
@@ -144,13 +155,15 @@ app.post("/robo", async (req, res) => {
         tipo_bici, marca_bici, modelo_bici, anio_bici,
         numero_serie, color, descripcion_bici,
         nombre_reportante, email_reportante, telefono_reportante,
+        foto_urls,
         expires_at
       ) VALUES (
         $1,$2,$3,$4,$5,$6,
         $7,$8,$9,$10,
         $11,$12,$13,
         $14,$15,$16,
-        $17
+        $17,
+        $18
       )`,
       [
         latNum,
@@ -169,6 +182,7 @@ app.post("/robo", async (req, res) => {
         nombreReportante || null,
         emailReportante || null,
         telefonoReportante || null,
+        urls.length ? urls : null,
         expira,
       ]
     );
@@ -176,6 +190,7 @@ app.post("/robo", async (req, res) => {
     return res.json({
       mensaje: "🚨 Robo registrado correctamente",
       expira,
+      fotosGuardadas: urls.length,
     });
   } catch (err) {
     console.error("❌ Error en POST /robo:", err.message);
@@ -209,7 +224,8 @@ app.get("/zonas-rojas", async (req, res) => {
         descripcion_bici AS "descripcionBici",
         nombre_reportante AS "nombreReportante",
         email_reportante AS "emailReportante",
-        telefono_reportante AS "telefonoReportante"
+        telefono_reportante AS "telefonoReportante",
+        COALESCE(foto_urls, ARRAY[]::text[]) AS "fotoUrls"
       FROM zonas_rojas
       ORDER BY created_at DESC
     `);
